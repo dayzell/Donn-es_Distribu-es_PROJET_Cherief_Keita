@@ -1,0 +1,11 @@
+{
+  "event_id": "EVT001",
+  "order_id": "ORD001",
+  "store_id": "STORE01",
+  "product_id": "PROD001",
+  "quantity": 2,
+  "unit_price": 150,
+  "total_amount": 300,
+  "event_type": "ORDER_CREATED",
+  "event_time": "2026-11-02T10:15:00"
+}
