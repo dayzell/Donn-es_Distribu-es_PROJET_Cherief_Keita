@@ -1,0 +1,3 @@
+# Les scripts shell sont exécutés dans des conteneurs Linux : fins de ligne LF obligatoires.
+*.sh text eol=lf
+Dockerfile text eol=lf
