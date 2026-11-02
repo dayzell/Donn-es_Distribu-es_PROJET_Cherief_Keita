@@ -29,7 +29,6 @@ Lancer le producer en premier : il crée le topic `sales-events` s'il n'existe p
 ```bash
 docker compose run --rm producer
 ```
-
 ## 3. Consommer l'événement
 Dans un deuxième terminal (ou après la fin du producer) :
 ```bash
@@ -55,3 +54,4 @@ docker compose down -v
 - `enable.idempotence=True` protège contre les doublons causés par les retries du producer dans le périmètre Kafka.
 - `enable.auto.commit=False` et le commit après traitement illustrent une approche at-least-once : un message peut être retraité si le traitement réussit mais que le commit n'est pas enregistré.
 - RF=1 est choisi pour la simplicité du TP. Il ne permet pas de démontrer la tolérance à la perte d'un broker.
+ahha
