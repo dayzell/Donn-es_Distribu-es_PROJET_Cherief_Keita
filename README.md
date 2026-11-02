@@ -3,8 +3,9 @@
 Projet Master 2 Data — module Données distribuées. Chaîne cible (cahier des charges) :
 
 ```
-API DummyJSON → producer → Kafka → consumer → PostgreSQL          (référentiels : fait)
-simulateur de commandes → Kafka → Spark → PostgreSQL → dashboard   (à venir)
+API DummyJSON → producer → Kafka → consumer → PostgreSQL     (référentiels : fait)
+simulator → Kafka                                             (commandes et paiements : fait)
+Kafka → Spark → PostgreSQL → dashboard                        (à venir)
 ```
 
 ## État d'avancement (démarche du cahier des charges, section 16)
@@ -13,7 +14,7 @@ simulateur de commandes → Kafka → Spark → PostgreSQL → dashboard   (à v
 | 02 | Exploration de DummyJSON | fait — [docs/etape-2-exploration-dummyjson.md](docs/etape-2-exploration-dummyjson.md) |
 | 03 | Référentiels : collecte DummyJSON, chargement PostgreSQL, rejeu | **fait** |
 | 04 | Kafka KRaft : broker, topics, partitions, clés | fait (topics de commandes prêts) |
-| 05 | Simulation commerciale (commandes, paiements) | à faire |
+| 05 | Simulation commerciale (commandes, paiements) | **fait** |
 | 06 | Spark Structured Streaming | à faire |
 | 07 | PostgreSQL : schéma, contraintes, index, upsert | schéma fait, upsert des agrégats à faire |
 | 08 | Tableau de bord | à faire |
@@ -34,6 +35,8 @@ Un dossier par service, nommé d'après ce qu'il contient.
 │   ├── producer.py  Dockerfile  requirements.txt
 ├── consumer/                   # Python : Kafka -> PostgreSQL (« Reference Loader » du cahier)
 │   ├── consumer.py  Dockerfile  requirements.txt
+├── simulator/                  # Python : commandes et paiements simulés -> Kafka (« Producteur » du cahier)
+│   ├── simulator.py  Dockerfile  requirements.txt
 └── docs/                       # rapports et dossier d'architecture
 ```
 
@@ -53,8 +56,9 @@ Résultat attendu (environ une minute) :
 | `retailpulse-kafka-init` | `Exited (0)` | a créé les topics, puis s'est arrêté |
 | `retailpulse-producer` | `Exited (0)` | a collecté DummyJSON et publié dans Kafka |
 | `retailpulse-consumer` | `Exited (0)` | a chargé Kafka dans PostgreSQL |
+| `retailpulse-simulator` | `Up` | génère des commandes et des paiements en continu |
 
-`Exited (0)` est normal pour les trois derniers : ce sont des traitements ponctuels (des « Jobs »), pas des services permanents.
+`Exited (0)` est normal pour kafka-init, producer et consumer : ce sont des traitements ponctuels (des « Jobs »), pas des services permanents.
 
 ## Ce que fait chaque service
 
@@ -89,6 +93,58 @@ Paramètres (variables d'environnement) : `KAFKA_BOOTSTRAP_SERVERS`, `DUMMYJSON_
 
 Paramètres : `KAFKA_BOOTSTRAP_SERVERS`, `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `BATCH_SIZE` (100).
 
+### simulator (`simulator/simulator.py`)
+Les commandes et les paiements sont **simulés** : ils ne viennent pas de DummyJSON (principe fondamental du cahier).
+1. Charge les produits et les clients depuis PostgreSQL (donc après le consumer).
+2. Pour chaque commande : un client au hasard, 1 à 4 produits distincts, 1 à 3 unités chacun, prix catalogue.
+3. Publie `ORDER_CREATED` dans `retail-orders`, puis le résultat dans `retail-order-events` quelques centaines de millisecondes plus tard :
+   `PAYMENT_COMPLETED` (85 %), `PAYMENT_FAILED` (10 %) ou `ORDER_CANCELLED` (5 %).
+4. Attend 0,5 à 2 secondes, puis recommence jusqu'au signal d'arrêt.
+5. Arrêt propre sur `docker compose stop simulator` (SIGTERM) : termine la commande en cours, vide le tampon Kafka (`flush`), affiche ses statistiques et sort avec le code 0.
+
+Règle de chiffre d'affaires : seul `PAYMENT_COMPLETED` compte. Une commande `ORDER_CANCELLED` est annulée **avant** paiement : un paiement réussi n'est jamais annulé ensuite, donc aucune règle de compensation n'est nécessaire.
+
+| Paramètre | Défaut | Rôle |
+|---|---|---|
+| `INTERVAL_MIN` / `INTERVAL_MAX` | 0.5 / 2.0 | secondes entre deux commandes |
+| `MAX_ITEMS` / `MAX_QUANTITY` | 4 / 3 | lignes par commande / unités par ligne |
+| `FAILURE_RATE` / `CANCEL_RATE` | 0.10 / 0.05 | part de paiements échoués / de commandes annulées |
+| `MAX_ORDERS` | 0 | nombre de commandes avant arrêt (0 = sans limite) |
+| `SEED` | — | graine aléatoire, pour une simulation reproductible |
+| `DUPLICATE_RATE` | 0 | test : republie un paiement avec le même `event_id` |
+| `LATE_RATE` / `LATE_MINUTES` | 0 / 30 | test : date un événement dans le passé |
+
+Dans `docker-compose.yml`, les cinq premiers se règlent depuis `.env` (`SIM_INTERVAL_MIN`, `SIM_FAILURE_RATE`…). Exemple de test des doublons :
+```bash
+docker compose run --rm --no-deps -e MAX_ORDERS=10 -e DUPLICATE_RATE=1 simulator
+```
+
+#### Contrat des événements (section 7 du cahier)
+Même structure dans les deux topics ; clé Kafka = `order_id`.
+```json
+{
+  "event_id": "7209acd3-bb63-4fd4-9c78-83fdef3cb93d",
+  "event_type": "PAYMENT_COMPLETED",
+  "event_timestamp": "2026-11-02T14:03:57.055Z",
+  "order_id": "ORD-037ed2af-baec-4c6a-9cd0-0dfd50d46483",
+  "customer_id": 92,
+  "items": [{"product_id": 115, "quantity": 1, "unit_price": 14999.99}],
+  "amount": 14999.99,
+  "currency": "USD"
+}
+```
+| Champ | Règle |
+|---|---|
+| `event_id` | UUID unique par événement ; clé de déduplication |
+| `event_type` | `ORDER_CREATED`, `PAYMENT_COMPLETED`, `PAYMENT_FAILED`, `ORDER_CANCELLED` |
+| `event_timestamp` | heure de production, ISO 8601 UTC, millisecondes, suffixe `Z` |
+| `order_id` | `ORD-<uuid>`, relie la commande et son paiement |
+| `customer_id` | identifiant DummyJSON du client |
+| `items` | `product_id` DummyJSON, quantité, prix unitaire catalogue |
+| `amount` / `currency` | montant **brut** (quantité × prix catalogue, sans remise), en USD |
+
+La catégorie n'est volontairement pas dans l'événement : Spark l'ajoutera depuis la table `products` (enrichissement, étape 06). Les lignes sont aussi copiées dans les événements de paiement, pour que Spark calcule le CA par catégorie sans jointure entre deux flux.
+
 ### postgres (`postgres/init/01_schema.sql`)
 Tables `products`, `customers`, `orders`, `sales_aggregates` (section 9 du cahier) et `invalid_events` (messages rejetés par Spark, étape 06). Le script ne s'exécute qu'à la première création du volume.
 
@@ -103,6 +159,14 @@ docker exec retailpulse-postgres sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -
 
 # Un message dans Kafka
 docker exec retailpulse-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 --topic retail-products --from-beginning --max-messages 1 --property print.key=true
+```
+
+### Suivre le simulateur
+```bash
+docker compose logs -f simulator          # statistiques toutes les 20 commandes
+docker exec retailpulse-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 --topic retail-order-events --property print.key=true --property print.partition=true
+docker compose stop simulator             # arrêt propre
+docker compose start simulator            # reprise
 ```
 
 ### Tester le rejeu
