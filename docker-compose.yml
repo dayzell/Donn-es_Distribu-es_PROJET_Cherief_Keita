@@ -2,7 +2,8 @@ name: retailpulse
 
 # Un seul "docker compose up -d" lance toute la chaîne, dans cet ordre :
 # kafka + postgres -> kafka-init (topics) -> producer (DummyJSON -> Kafka)
-# -> consumer (Kafka -> PostgreSQL) -> simulator (commandes et paiements, en continu).
+# -> consumer (Kafka -> PostgreSQL) -> simulator (commandes et paiements, en continu)
+#                                    -> spark (traitement streaming, en continu).
 
 services:
   kafka:
@@ -122,8 +123,42 @@ services:
       CANCEL_RATE: ${SIM_CANCEL_RATE:-0.05}
       MAX_ORDERS: ${SIM_MAX_ORDERS:-0}
     stop_grace_period: 20s   # laisse le temps du flush Kafka à l'arrêt
+    # on-failure : relancé après un plantage, mais pas après une fin normale
+    # (sinon SIM_MAX_ORDERS > 0 relancerait la simulation en boucle).
+    restart: on-failure
+
+  # Spark Structured Streaming : Kafka -> validation, déduplication, agrégats -> PostgreSQL
+  spark:
+    build: ./spark
+    container_name: retailpulse-spark
+    depends_on:
+      consumer:
+        condition: service_completed_successfully
+    ports:
+      - "${SPARK_UI_PORT:-4040}:4040"   # Spark UI (onglet Structured Streaming)
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      CHECKPOINT_DIR: /checkpoints
+      WINDOW_DURATION: 5 minutes
+      WATERMARK_DELAY: ${SPARK_WATERMARK_DELAY:-10 minutes}
+      TRIGGER_INTERVAL: ${SPARK_TRIGGER_INTERVAL:-10 seconds}
+    volumes:
+      - spark_checkpoints:/checkpoints   # checkpoint persistant : reprise après redémarrage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:4040 > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
     restart: unless-stopped
 
 volumes:
   kafka_data:
   pg_data:
+  spark_checkpoints:

@@ -4,8 +4,8 @@ Projet Master 2 Data — module Données distribuées. Chaîne cible (cahier des
 
 ```
 API DummyJSON → producer → Kafka → consumer → PostgreSQL     (référentiels : fait)
-simulator → Kafka                                             (commandes et paiements : fait)
-Kafka → Spark → PostgreSQL → dashboard                        (à venir)
+simulator → Kafka → Spark → PostgreSQL                        (commandes, paiements, CA : fait)
+PostgreSQL → dashboard                                        (à venir)
 ```
 
 ## État d'avancement (démarche du cahier des charges, section 16)
@@ -15,8 +15,8 @@ Kafka → Spark → PostgreSQL → dashboard                        (à venir)
 | 03 | Référentiels : collecte DummyJSON, chargement PostgreSQL, rejeu | **fait** |
 | 04 | Kafka KRaft : broker, topics, partitions, clés | fait (topics de commandes prêts) |
 | 05 | Simulation commerciale (commandes, paiements) | **fait** |
-| 06 | Spark Structured Streaming | à faire |
-| 07 | PostgreSQL : schéma, contraintes, index, upsert | schéma fait, upsert des agrégats à faire |
+| 06 | Spark Structured Streaming | **fait** — résultats des tests : [docs/tests-etape-06-spark.md](docs/tests-etape-06-spark.md) |
+| 07 | PostgreSQL : schéma, contraintes, index, upsert | **fait** (upsert des agrégats et des commandes par Spark) |
 | 08 | Tableau de bord | à faire |
 | 09 | Docker et Kubernetes | Docker fait pour les services existants, Kubernetes à faire |
 | 10 | Tests et soutenance | à faire |
@@ -37,6 +37,10 @@ Un dossier par service, nommé d'après ce qu'il contient.
 │   ├── consumer.py  Dockerfile  requirements.txt
 ├── simulator/                  # Python : commandes et paiements simulés -> Kafka (« Producteur » du cahier)
 │   ├── simulator.py  Dockerfile  requirements.txt
+├── spark/                      # Spark Structured Streaming : Kafka -> agrégats -> PostgreSQL
+│   ├── streaming.py  Dockerfile  requirements.txt
+├── tests/
+│   └── check_pipeline.py       # compare PostgreSQL au contenu de Kafka
 └── docs/                       # rapports et dossier d'architecture
 ```
 
@@ -47,7 +51,7 @@ cp .env.example .env          # puis choisir un mot de passe PostgreSQL dans .en
 docker compose up -d --build
 docker compose ps -a
 ```
-Résultat attendu (environ une minute) :
+Résultat attendu après environ deux minutes (plus longtemps au premier lancement : téléchargement et construction des images, dont celle de Spark, environ 1,9 Go) :
 
 | Conteneur | État attendu | Rôle |
 |---|---|---|
@@ -57,6 +61,7 @@ Résultat attendu (environ une minute) :
 | `retailpulse-producer` | `Exited (0)` | a collecté DummyJSON et publié dans Kafka |
 | `retailpulse-consumer` | `Exited (0)` | a chargé Kafka dans PostgreSQL |
 | `retailpulse-simulator` | `Up` | génère des commandes et des paiements en continu |
+| `retailpulse-spark` | `Up (healthy)` | calcule le CA en continu ; Spark UI sur http://localhost:4040 |
 
 `Exited (0)` est normal pour kafka-init, producer et consumer : ce sont des traitements ponctuels (des « Jobs »), pas des services permanents.
 
@@ -145,6 +150,33 @@ Même structure dans les deux topics ; clé Kafka = `order_id`.
 
 La catégorie n'est volontairement pas dans l'événement : Spark l'ajoutera depuis la table `products` (enrichissement, étape 06). Les lignes sont aussi copiées dans les événements de paiement, pour que Spark calcule le CA par catégorie sans jointure entre deux flux.
 
+### spark (`spark/streaming.py`)
+Image officielle `apache/spark:3.5.3`, à laquelle sont ajoutés le connecteur Kafka et le pilote JDBC PostgreSQL. Spark tourne en mode `local[2]` (driver et exécuteurs dans un seul conteneur) : suffisant pour le volume du projet, à justifier comme simplification face au schéma driver/workers du cours.
+
+Spark lit `retail-orders` et `retail-order-events` (adresse `kafka:29092`), parse le JSON avec un schéma explicite, puis lance **trois requêtes streaming**, chacune avec son checkpoint dans le volume `spark_checkpoints` :
+
+| Requête | Traitement | Table PostgreSQL |
+|---|---|---|
+| `invalid` | messages rejetés, avec leur raison : `json_invalide_ou_champ_manquant`, `horodatage_invalide`, `type_inattendu`, `montant_negatif`, `ligne_invalide`, `produit_inconnu` | `invalid_events` (une ligne par message, identifiée par topic/partition/offset) |
+| `orders` | une ligne par commande ; `ORDER_CREATED` fixe montant et date, le paiement fixe le statut (`PAID`, `FAILED`, `CANCELLED`). Client inconnu → `invalid_events` (`client_inconnu`) | `orders` (upsert) |
+| `aggregates` | `PAYMENT_COMPLETED` uniquement → déduplication par `event_id` → une ligne par produit → catégorie depuis `products` → fenêtres de 5 minutes par catégorie : nombre de commandes, quantités, CA | `sales_aggregates` (upsert) |
+
+Choix et garanties :
+- **Chiffre d'affaires** : seul `PAYMENT_COMPLETED` est compté ; `PAYMENT_FAILED` et `ORDER_CANCELLED` ne changent que le statut dans `orders`.
+- **Déduplication** : `dropDuplicatesWithinWatermark(event_id)`. Spark garde en mémoire les `event_id` vus pendant la durée du watermark (10 min) : un doublon arrivé dans ce délai est ignoré. Un doublon arrivé plus tard serait déjà « tardif » et écarté par le watermark.
+- **Watermark de 10 minutes** sur `event_timestamp` (heure de l'événement, pas heure de traitement). Un événement en retard de moins de 10 minutes sur le plus récent vu est intégré à sa fenêtre ; au-delà, il est ignoré et l'état de la fenêtre est libéré.
+- **Upsert idempotent** : en mode `update`, Spark émet la valeur complète de l'agrégat ; PostgreSQL la **remplace** (`ON CONFLICT … DO UPDATE`), sans l'additionner. Rejouer un micro-batch réécrit les mêmes valeurs.
+- **Checkpoint persistant** : offsets Kafka et état (déduplication, agrégats) sont sauvegardés. Après un redémarrage, Spark reprend au dernier offset traité.
+- **Enrichissement** : jointure entre le flux et la table `products` lue en JDBC. Dans une jointure flux-statique, Spark relit normalement la table à chaque micro-batch, donc un produit ajouté devrait être pris en compte sans redémarrage ; ce point n'a pas encore été testé.
+- **Nombre de commandes** par catégorie : nombre d'`order_id` distincts (une commande avec deux produits de la même catégorie compte une fois).
+
+| Paramètre | Défaut | Rôle |
+|---|---|---|
+| `WINDOW_DURATION` | 5 minutes | taille des fenêtres (imposée par le cahier) |
+| `WATERMARK_DELAY` | 10 minutes | retard toléré (réglable via `SPARK_WATERMARK_DELAY` dans `.env`) |
+| `TRIGGER_INTERVAL` | 10 seconds | fréquence des micro-batches (`SPARK_TRIGGER_INTERVAL`) |
+| `MAX_OFFSETS_PER_TRIGGER` | 5000 | messages lus au maximum par micro-batch |
+
 ### postgres (`postgres/init/01_schema.sql`)
 Tables `products`, `customers`, `orders`, `sales_aggregates` (section 9 du cahier) et `invalid_events` (messages rejetés par Spark, étape 06). Le script ne s'exécute qu'à la première création du volume.
 
@@ -169,6 +201,19 @@ docker compose stop simulator             # arrêt propre
 docker compose start simulator            # reprise
 ```
 
+### Vérifier les résultats de Spark
+```bash
+# Compare PostgreSQL au contenu de Kafka (CA, quantités, statuts) ; code 0 si tout est identique
+MSYS_NO_PATHCONV=1 docker compose run --rm --no-deps -v ./tests:/tests --entrypoint python simulator /tests/check_pipeline.py
+
+# Les 10 meilleures catégories
+docker exec retailpulse-postgres sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c "SELECT category, sum(total_revenue) ca FROM sales_aggregates GROUP BY 1 ORDER BY 2 DESC LIMIT 10"'
+
+# Logs métier de Spark (un résumé par micro-batch)
+docker compose logs -f spark | grep -E "orders|aggregates|invalid"
+```
+Le script recalcule le résultat attendu à partir de Kafka, sans passer par Spark. Il doit être lancé simulateur arrêté (sinon des événements sont encore en cours de traitement). Il signale aussi un écart si on a injecté exprès des événements tardifs ou des produits inconnus : c'est alors le comportement voulu.
+
 ### Tester le rejeu
 ```bash
 docker compose run --rm producer              # nouvelle collecte
@@ -186,3 +231,6 @@ docker compose down -v     # supprime aussi les volumes (le schéma SQL sera rej
 - Un seul broker Kafka (RF=1) : pas de tolérance à la perte du broker.
 - Les données DummyJSON sont fictives ; leurs volumes peuvent changer (ils ne sont pas codés en dur).
 - Le consumer recharge tout le référentiel à chaque exécution : simple et rejouable, acceptable pour quelques centaines de lignes.
+- Spark tourne en mode `local[2]` dans un seul conteneur : pas de répartition sur plusieurs machines.
+- Un paiement en retard de plus de 10 minutes (watermark) n'entre pas dans le chiffre d'affaires ; il reste visible dans Kafka et dans `orders`.
+- Un doublon d'`event_id` arrivé plus de 10 minutes après l'original n'est plus détecté par la déduplication (mais il est alors aussi écarté par le watermark).
