@@ -1,3 +1,6 @@
 .env
 *.json.bak
 __pycache__/
+
+# Début de la période de test (notebook de résilience)
+tests/.test_period.json

@@ -1,0 +1,4 @@
+Config,Débit produit (évt/s),Débit traité (évt/s),Lag fin (msgs),Latence p50 (s),Latence p95 (s),En attente,Spark CPU %,Spark RAM (MiB),Kafka CPU %,Kafka RAM (MiB),Postgres CPU %
+"A — défaut (~0,8 cmd/s)",1.8,1.7,18,7.7,12.1,0,99.3,621,5.0,1064,3.1
+B — charge élevée,137.4,132.0,1711,8.3,12.9,0,104.6,637,81.5,1093,4.0
+B + Spark limité à 1 CPU,135.7,131.6,2240,8.2,13.1,0,100.9,710,49.0,1112,19.8
