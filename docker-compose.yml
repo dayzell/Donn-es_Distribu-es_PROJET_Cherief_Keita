@@ -151,7 +151,7 @@ services:
       CHECKPOINT_DIR: /checkpoints
       WINDOW_DURATION: 5 minutes
       WATERMARK_DELAY: ${SPARK_WATERMARK_DELAY:-10 minutes}
-      TRIGGER_INTERVAL: ${SPARK_TRIGGER_INTERVAL:-10 seconds}
+      TRIGGER_INTERVAL: ${SPARK_TRIGGER_INTERVAL:-5 minutes}
     volumes:
       - spark_checkpoints:/checkpoints   # checkpoint persistant : reprise après redémarrage
     healthcheck:
@@ -178,7 +178,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-      REFRESH_SECONDS: ${DASHBOARD_REFRESH_SECONDS:-10}
+      REFRESH_SECONDS: ${DASHBOARD_REFRESH_SECONDS:-60}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=3)"]
       interval: 15s

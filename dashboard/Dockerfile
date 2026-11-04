@@ -4,7 +4,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY .streamlit ./.streamlit
-COPY app.py ./
+COPY app.py us-states.json spark-logo.png ./
 
 # Exécution sans les droits root
 RUN useradd --create-home app

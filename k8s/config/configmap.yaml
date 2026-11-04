@@ -26,6 +26,6 @@ data:
   CHECKPOINT_DIR: "/checkpoints"
   WINDOW_DURATION: "5 minutes"
   WATERMARK_DELAY: "10 minutes"
-  TRIGGER_INTERVAL: "10 seconds"
+  TRIGGER_INTERVAL: "5 minutes"
   # dashboard
-  REFRESH_SECONDS: "10"
+  REFRESH_SECONDS: "60"

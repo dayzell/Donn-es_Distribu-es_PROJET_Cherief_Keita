@@ -178,7 +178,7 @@ Choix et garanties :
 |---|---|---|
 | `WINDOW_DURATION` | 5 minutes | taille des fenêtres (imposée par le cahier) |
 | `WATERMARK_DELAY` | 10 minutes | retard toléré (réglable via `SPARK_WATERMARK_DELAY` dans `.env`) |
-| `TRIGGER_INTERVAL` | 10 seconds | fréquence des micro-batches (`SPARK_TRIGGER_INTERVAL`) |
+| `TRIGGER_INTERVAL` | 5 minutes | fréquence des micro-batches (`SPARK_TRIGGER_INTERVAL`) |
 | `MAX_OFFSETS_PER_TRIGGER` | 5000 | messages lus au maximum par micro-batch |
 
 ### dashboard (`dashboard/app.py`)
@@ -195,7 +195,7 @@ Tableau de bord **Streamlit**, ouvert sur **http://localhost:8501**. Il lit Post
 | Dernières commandes (statut avec icône et libellé) et dernières agrégations | `orders`, `sales_aggregates` |
 | Heure de dernière actualisation et fraîcheur des données | `max(updated_at)` des agrégats |
 
-- **Actualisation** toutes les 10 secondes (`DASHBOARD_REFRESH_SECONDS`), sans recharger la page.
+- **Actualisation** toutes les 60 secondes (`DASHBOARD_REFRESH_SECONDS`), sans recharger la page.
 - **Fraîcheur** : bandeau vert si le dernier agrégat date de moins de 60 s, orange (« Données figées ») sinon : simulateur ou Spark arrêté.
 - **Erreurs** : base vide → message d'information ; PostgreSQL injoignable → message d'erreur, nouvel essai automatique.
 - Graphiques en une seule teinte (une série par graphique) avec info-bulles au survol ; les montants exacts sont aussi dans les tableaux.
@@ -303,7 +303,7 @@ awk "BEGIN {printf \"Débit produit : %.2f événements/s\n\", ($B-$A)/60}"
 Chaque commande produit 2 événements : un dans `retail-orders`, un dans `retail-order-events`.
 
 ### 2. Débit traité par Spark
-- **Interface Spark** : http://localhost:4040/StreamingQuery/, requête `aggregates` → *Input Rate* (événements reçus/s), *Process Rate* (traités/s), *Batch Duration* (au-delà de 10 s, Spark prend du retard). Faire des captures pour le rapport.
+- **Interface Spark** : http://localhost:4040/StreamingQuery/, requête `aggregates` → *Input Rate* (événements reçus/s), *Process Rate* (traités/s), *Batch Duration* (au-delà de l'intervalle de trigger, 5 min, Spark prend du retard). Faire des captures pour le rapport.
 - **Depuis PostgreSQL** (commandes dont Spark a écrit le statut dans la dernière minute) :
   ```bash
   sql "SELECT count(*) AS commandes_traitees_par_minute FROM orders WHERE updated_at > now() - interval '1 minute'"
@@ -360,7 +360,7 @@ docker update --cpus 0 retailpulse-spark                                 # retir
 
 Remettre ensuite la configuration par défaut : `SIM_INTERVAL_MIN=0.5` et `SIM_INTERVAL_MAX=2.0` dans `.env`, `docker compose up -d --no-deps simulator`, `docker update --cpus 0 retailpulse-spark`.
 
-Dans l'analyse : identifier le **goulot d'étranglement** (probablement Spark : durée de batch supérieure au trigger de 10 s, ou lag qui grandit) et **proposer des améliorations** (plus de CPU, `local[4]`, plus de partitions, trigger plus court, Spark en cluster).
+Dans l'analyse : identifier le **goulot d'étranglement** (probablement Spark : durée de batch supérieure au trigger de 5 min, ou lag qui grandit) et **proposer des améliorations** (plus de CPU, `local[4]`, plus de partitions, trigger plus court, Spark en cluster).
 
 ## Arrêter
 ```bash

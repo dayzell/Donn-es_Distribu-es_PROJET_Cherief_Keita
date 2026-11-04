@@ -54,7 +54,7 @@ persistentvolumeclaim/spark-checkpoints   Bound    1Gi        standard
 |---|---|
 | Jobs de référentiels | `producer` : « 194 produits, 208 clients publiés » ; `consumer` : 194 et 208 lignes en base |
 | Flux de commandes | 82 → 106 commandes et CA 156 692 $ → 223 549 $ en 30 s, sans intervention |
-| Spark | micro-batches `orders` et `aggregates` toutes les ~10 s |
+| Spark | micro-batches `orders` et `aggregates` toutes les ~5 min |
 | Tableau de bord (exécuté dans son pod) | aucune exception, « ✅ Données à jour », 5 indicateurs remplis ; Service : `/_stcore/health` = ok, page HTTP 200 |
 
 **Critère d'acceptation du cahier validé dans Kubernetes** : une commande simulée traverse Kafka et Spark, est persistée dans PostgreSQL et apparaît sur le tableau de bord sans intervention manuelle.

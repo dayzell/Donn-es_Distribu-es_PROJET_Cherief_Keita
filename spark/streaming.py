@@ -24,7 +24,7 @@ EVENTS_TOPIC = "retail-order-events"
 CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/checkpoints")
 WATERMARK_DELAY = os.getenv("WATERMARK_DELAY", "10 minutes")
 WINDOW_DURATION = os.getenv("WINDOW_DURATION", "5 minutes")
-TRIGGER_INTERVAL = os.getenv("TRIGGER_INTERVAL", "10 seconds")
+TRIGGER_INTERVAL = os.getenv("TRIGGER_INTERVAL", "5 minutes")
 MAX_OFFSETS_PER_TRIGGER = os.getenv("MAX_OFFSETS_PER_TRIGGER", "5000")
 
 PG = {
