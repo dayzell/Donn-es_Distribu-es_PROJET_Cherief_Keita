@@ -1,0 +1,35 @@
+# Contrôle d'intégrité (tests/check_pipeline.py) : compare PostgreSQL au contenu de Kafka.
+# Non lancé par deploy.sh. Le simulateur doit être arrêté pendant le contrôle :
+#   kubectl -n retailpulse scale deployment/simulator --replicas=0 ; sleep 40
+#   kubectl -n retailpulse create configmap pipeline-check --from-file=tests/check_pipeline.py --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl -n retailpulse delete job check-pipeline --ignore-not-found ; kubectl apply -f k8s/jobs/check-pipeline-job.yaml
+#   kubectl -n retailpulse wait --for=condition=complete job/check-pipeline --timeout=120s ; kubectl -n retailpulse logs job/check-pipeline
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: check-pipeline
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: check-pipeline, app.kubernetes.io/part-of: retailpulse}
+spec:
+  backoffLimit: 0           # un écart fait échouer le Job (code 1) : pas de nouvelle tentative
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: check-pipeline, app.kubernetes.io/part-of: retailpulse}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: check
+          image: retailpulse-simulator:1.0     # contient déjà Python, confluent-kafka et psycopg2
+          imagePullPolicy: Never
+          command: ["python", "/tests/check_pipeline.py"]
+          envFrom:
+            - configMapRef: {name: retailpulse-config}
+            - secretRef: {name: retailpulse-db}
+          volumeMounts:
+            - {name: tests, mountPath: /tests}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+      volumes:
+        - name: tests
+          configMap: {name: pipeline-check}

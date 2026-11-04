@@ -1,0 +1,67 @@
+# Spark Structured Streaming : Kafka -> validation, déduplication, agrégats -> PostgreSQL.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: spark-checkpoints
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: spark, app.kubernetes.io/part-of: retailpulse}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests: {storage: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-ui
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: spark, app.kubernetes.io/part-of: retailpulse}
+spec:
+  selector: {app.kubernetes.io/name: spark}
+  ports:
+    - {name: ui, port: 4040, targetPort: 4040}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: spark, app.kubernetes.io/part-of: retailpulse}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # un seul processus à la fois écrit dans le checkpoint
+  selector:
+    matchLabels: {app.kubernetes.io/name: spark}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: spark, app.kubernetes.io/part-of: retailpulse}
+    spec:
+      securityContext:
+        fsGroup: 185        # utilisateur spark de l'image : droits d'écriture sur le checkpoint
+      containers:
+        - name: spark
+          image: retailpulse-spark:1.0
+          imagePullPolicy: Never
+          ports:
+            - {name: ui, containerPort: 4040}
+          envFrom:
+            - configMapRef: {name: retailpulse-config}
+            - secretRef: {name: retailpulse-db}
+          volumeMounts:
+            - {name: checkpoints, mountPath: /checkpoints}
+          resources:
+            requests: {cpu: "1", memory: 1536Mi}
+            limits: {cpu: "2", memory: 2560Mi}
+          readinessProbe:
+            httpGet: {path: /, port: 4040}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /, port: 4040}
+            initialDelaySeconds: 90
+            periodSeconds: 20
+            failureThreshold: 6
+      volumes:
+        - name: checkpoints
+          persistentVolumeClaim: {claimName: spark-checkpoints}

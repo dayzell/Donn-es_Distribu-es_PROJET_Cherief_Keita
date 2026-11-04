@@ -1,0 +1,26 @@
+# Simulation continue des commandes et paiements -> retail-orders / retail-order-events.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simulator
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: simulator, app.kubernetes.io/part-of: retailpulse}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: simulator}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: simulator, app.kubernetes.io/part-of: retailpulse}
+    spec:
+      terminationGracePeriodSeconds: 20   # le simulateur vide son tampon Kafka sur SIGTERM
+      containers:
+        - name: simulator
+          image: retailpulse-simulator:1.0
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef: {name: retailpulse-config}
+            - secretRef: {name: retailpulse-db}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 250m, memory: 256Mi}

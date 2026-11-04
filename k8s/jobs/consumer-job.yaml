@@ -1,0 +1,24 @@
+# Reference Loader : retail-products / retail-customers -> PostgreSQL (upsert, rejouable).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: consumer
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: consumer, app.kubernetes.io/part-of: retailpulse}
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: consumer, app.kubernetes.io/part-of: retailpulse}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: consumer
+          image: retailpulse-consumer:1.0
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef: {name: retailpulse-config}
+            - secretRef: {name: retailpulse-db}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}

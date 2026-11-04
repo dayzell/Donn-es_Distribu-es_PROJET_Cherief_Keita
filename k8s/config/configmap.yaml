@@ -1,0 +1,31 @@
+# Paramètres non sensibles, partagés par les composants.
+# Le mot de passe PostgreSQL est dans le Secret "retailpulse-db", créé par deploy.sh à partir de .env.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: retailpulse-config
+  namespace: retailpulse
+  labels:
+    app.kubernetes.io/part-of: retailpulse
+data:
+  # Noms DNS des Services Kubernetes (même espace de noms)
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  TZ: "UTC"
+  # producer (collecte DummyJSON)
+  DUMMYJSON_BASE_URL: "https://dummyjson.com"
+  PAGE_SIZE: "50"
+  # simulator
+  INTERVAL_MIN: "0.5"
+  INTERVAL_MAX: "2.0"
+  FAILURE_RATE: "0.10"
+  CANCEL_RATE: "0.05"
+  MAX_ORDERS: "0"
+  # spark
+  CHECKPOINT_DIR: "/checkpoints"
+  WINDOW_DURATION: "5 minutes"
+  WATERMARK_DELAY: "10 minutes"
+  TRIGGER_INTERVAL: "10 seconds"
+  # dashboard
+  REFRESH_SECONDS: "10"

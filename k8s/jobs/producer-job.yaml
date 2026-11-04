@@ -1,0 +1,23 @@
+# Collecte DummyJSON -> retail-products / retail-customers (traitement ponctuel).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: producer
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: producer, app.kubernetes.io/part-of: retailpulse}
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: producer, app.kubernetes.io/part-of: retailpulse}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: producer
+          image: retailpulse-producer:1.0
+          imagePullPolicy: Never          # image construite localement (docker compose build)
+          envFrom:
+            - configMapRef: {name: retailpulse-config}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}

@@ -75,6 +75,7 @@ services:
   # API Collector : DummyJSON -> retail-products / retail-customers
   producer:
     build: ./producer
+    image: retailpulse-producer:1.0
     container_name: retailpulse-producer
     depends_on:
       kafka-init:
@@ -88,6 +89,7 @@ services:
   # Reference Loader : retail-products / retail-customers -> PostgreSQL (upsert)
   consumer:
     build: ./consumer
+    image: retailpulse-consumer:1.0
     container_name: retailpulse-consumer
     depends_on:
       producer:
@@ -106,6 +108,7 @@ services:
   # Simulation commerciale continue : retail-orders / retail-order-events
   simulator:
     build: ./simulator
+    image: retailpulse-simulator:1.0
     container_name: retailpulse-simulator
     depends_on:
       consumer:
@@ -130,6 +133,7 @@ services:
   # Spark Structured Streaming : Kafka -> validation, déduplication, agrégats -> PostgreSQL
   spark:
     build: ./spark
+    image: retailpulse-spark:1.0
     container_name: retailpulse-spark
     depends_on:
       consumer:
@@ -156,6 +160,31 @@ services:
       timeout: 5s
       retries: 10
       start_period: 60s
+    restart: unless-stopped
+
+  # Tableau de bord Streamlit : lit PostgreSQL, ne recalcule rien
+  dashboard:
+    build: ./dashboard
+    image: retailpulse-dashboard:1.0
+    container_name: retailpulse-dashboard
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      REFRESH_SECONDS: ${DASHBOARD_REFRESH_SECONDS:-10}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
 volumes:

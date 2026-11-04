@@ -1,0 +1,90 @@
+# Kafka 4.0 en mode KRaft (broker + contrôleur), un seul nœud, données sur volume persistant.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless          # service « gouverneur » du StatefulSet (identité stable kafka-0)
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: kafka, app.kubernetes.io/part-of: retailpulse}
+spec:
+  clusterIP: None
+  selector: {app.kubernetes.io/name: kafka}
+  ports:
+    - {name: broker, port: 29092}
+    - {name: controller, port: 9093}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka                   # adresse utilisée par les clients : kafka:29092
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: kafka, app.kubernetes.io/part-of: retailpulse}
+spec:
+  selector: {app.kubernetes.io/name: kafka}
+  ports:
+    - {name: broker, port: 29092, targetPort: 29092}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: kafka, app.kubernetes.io/part-of: retailpulse}
+spec:
+  serviceName: kafka-headless
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: kafka}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: kafka, app.kubernetes.io/part-of: retailpulse}
+    spec:
+      # Sans cela, Kubernetes injecte KAFKA_PORT=tcp://... (service "kafka"),
+      # que l'image apache/kafka convertirait en propriété de configuration invalide.
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 1000            # utilisateur appuser de l'image : droits d'écriture sur le volume
+      containers:
+        - name: kafka
+          image: apache/kafka:4.0.0
+          ports:
+            - {name: broker, containerPort: 29092}
+            - {name: controller, containerPort: 9093}
+          env:
+            - {name: KAFKA_NODE_ID, value: "1"}
+            - {name: KAFKA_PROCESS_ROLES, value: "broker,controller"}
+            - {name: KAFKA_LISTENERS, value: "PLAINTEXT://:29092,CONTROLLER://:9093"}
+            - {name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka:29092"}
+            - {name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"}
+            - {name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "PLAINTEXT"}
+            - {name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER"}
+            - {name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@localhost:9093"}
+            - {name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1"}
+            - {name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1"}
+            - {name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1"}
+            - {name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0"}
+            - {name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "false"}
+            - {name: KAFKA_LOG_DIRS, value: "/var/lib/kafka/data/logs"}
+            - {name: KAFKA_HEAP_OPTS, value: "-Xms512m -Xmx768m"}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/kafka/data}
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {cpu: "1", memory: 1536Mi}
+          # Port d'écoute du broker. Pas de client Kafka complet ici : il se reconnecterait via le
+          # Service "kafka", qui n'achemine le trafic qu'une fois le pod prêt (attente circulaire).
+          readinessProbe:
+            tcpSocket: {port: 29092}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: 29092}
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: {storage: 2Gi}

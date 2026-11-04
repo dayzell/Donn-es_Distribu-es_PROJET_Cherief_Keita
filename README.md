@@ -5,7 +5,7 @@ Projet Master 2 Data — module Données distribuées. Chaîne cible (cahier des
 ```
 API DummyJSON → producer → Kafka → consumer → PostgreSQL     (référentiels : fait)
 simulator → Kafka → Spark → PostgreSQL                        (commandes, paiements, CA : fait)
-PostgreSQL → dashboard                                        (à venir)
+PostgreSQL → dashboard (Streamlit)                            (tableau de bord : fait)
 ```
 
 ## État d'avancement (démarche du cahier des charges, section 16)
@@ -17,8 +17,8 @@ PostgreSQL → dashboard                                        (à venir)
 | 05 | Simulation commerciale (commandes, paiements) | **fait** |
 | 06 | Spark Structured Streaming | **fait** — résultats des tests : [docs/tests-etape-06-spark.md](docs/tests-etape-06-spark.md) |
 | 07 | PostgreSQL : schéma, contraintes, index, upsert | **fait** (upsert des agrégats et des commandes par Spark) |
-| 08 | Tableau de bord | à faire |
-| 09 | Docker et Kubernetes | Docker fait pour les services existants, Kubernetes à faire |
+| 08 | Tableau de bord | **fait** — http://localhost:8501 ; tests : [docs/tests-etape-08-dashboard.md](docs/tests-etape-08-dashboard.md) |
+| 09 | Docker et Kubernetes | **fait** — déployé et testé sur minikube : [docs/deploiement-kubernetes.md](docs/deploiement-kubernetes.md) |
 | 10 | Tests et soutenance | à faire |
 
 ## Structure du dépôt
@@ -39,6 +39,9 @@ Un dossier par service, nommé d'après ce qu'il contient.
 │   ├── simulator.py  Dockerfile  requirements.txt
 ├── spark/                      # Spark Structured Streaming : Kafka -> agrégats -> PostgreSQL
 │   ├── streaming.py  Dockerfile  requirements.txt
+├── dashboard/                  # Streamlit : tableau de bord, lit PostgreSQL
+│   ├── app.py  Dockerfile  requirements.txt
+├── k8s/                        # manifestes Kubernetes (namespace, config, kafka, postgres, jobs, apps) + deploy.sh
 ├── tests/
 │   └── check_pipeline.py       # compare PostgreSQL au contenu de Kafka
 └── docs/                       # rapports et dossier d'architecture
@@ -62,6 +65,7 @@ Résultat attendu après environ deux minutes (plus longtemps au premier lanceme
 | `retailpulse-consumer` | `Exited (0)` | a chargé Kafka dans PostgreSQL |
 | `retailpulse-simulator` | `Up` | génère des commandes et des paiements en continu |
 | `retailpulse-spark` | `Up (healthy)` | calcule le CA en continu ; Spark UI sur http://localhost:4040 |
+| `retailpulse-dashboard` | `Up (healthy)` | tableau de bord sur **http://localhost:8501** |
 
 `Exited (0)` est normal pour kafka-init, producer et consumer : ce sont des traitements ponctuels (des « Jobs »), pas des services permanents.
 
@@ -177,10 +181,31 @@ Choix et garanties :
 | `TRIGGER_INTERVAL` | 10 seconds | fréquence des micro-batches (`SPARK_TRIGGER_INTERVAL`) |
 | `MAX_OFFSETS_PER_TRIGGER` | 5000 | messages lus au maximum par micro-batch |
 
+### dashboard (`dashboard/app.py`)
+Tableau de bord **Streamlit**, ouvert sur **http://localhost:8501**. Il lit PostgreSQL (`sales_aggregates`, `orders`, `customers`) et **ne recalcule aucune agrégation métier** : les montants sont ceux écrits par Spark.
+
+| Indicateur (section 10 du cahier) | Source |
+|---|---|
+| Chiffre d'affaires total (paiements réussis), en USD | somme de `sales_aggregates.total_revenue` |
+| Nombre de commandes / commandes payées | `orders` (statut `PAID`) |
+| Articles vendus | somme de `sales_aggregates.total_quantity` |
+| Catégories représentées | catégories présentes dans `sales_aggregates` |
+| Évolution du CA par fenêtre de 5 minutes (6 dernières heures) | `sales_aggregates` par `window_start` |
+| Répartition du CA par catégorie + Top 10 (avec part du CA) | `sales_aggregates` par `category` |
+| Dernières commandes (statut avec icône et libellé) et dernières agrégations | `orders`, `sales_aggregates` |
+| Heure de dernière actualisation et fraîcheur des données | `max(updated_at)` des agrégats |
+
+- **Actualisation** toutes les 10 secondes (`DASHBOARD_REFRESH_SECONDS`), sans recharger la page.
+- **Fraîcheur** : bandeau vert si le dernier agrégat date de moins de 60 s, orange (« Données figées ») sinon : simulateur ou Spark arrêté.
+- **Erreurs** : base vide → message d'information ; PostgreSQL injoignable → message d'erreur, nouvel essai automatique.
+- Graphiques en une seule teinte (une série par graphique) avec info-bulles au survol ; les montants exacts sont aussi dans les tableaux.
+
 ### postgres (`postgres/init/01_schema.sql`)
 Tables `products`, `customers`, `orders`, `sales_aggregates` (section 9 du cahier) et `invalid_events` (messages rejetés par Spark, étape 06). Le script ne s'exécute qu'à la première création du volume.
 
 ## Vérifier
+Guide complet, test par test avec les résultats attendus : **[docs/guide-de-test.md](docs/guide-de-test.md)**.
+
 Sous Git Bash (Windows), préfixer les commandes `docker exec` par `MSYS_NO_PATHCONV=1`.
 ```bash
 # Logs du producer et du consumer
@@ -221,6 +246,122 @@ docker compose run --rm --no-deps consumer    # nouveau chargement (--no-deps : 
 ```
 Les compteurs restent à 194 et 208. Les logs du consumer montrent plus de messages lus (les anciennes versions ne sont pas encore effacées par la compaction), mais le même nombre de lignes en base.
 
+## Déploiement Kubernetes (minikube)
+Toute la plateforme peut aussi tourner dans Kubernetes, dans le namespace `retailpulse`. Détail des ressources, preuves et tests : **[docs/deploiement-kubernetes.md](docs/deploiement-kubernetes.md)**.
+
+| Fichier | Contenu |
+|---|---|
+| `k8s/00-namespace.yaml` | namespace `retailpulse` |
+| `k8s/config/configmap.yaml` | paramètres non sensibles (le Secret PostgreSQL est créé depuis `.env` par `deploy.sh`) |
+| `k8s/kafka/` | Kafka (StatefulSet + PVC + Services) et Job de création des topics |
+| `k8s/postgres/` | PostgreSQL (StatefulSet + PVC + Service), schéma SQL via ConfigMap |
+| `k8s/jobs/` | Jobs `producer`, `consumer` et `check-pipeline` (contrôle d'intégrité) |
+| `k8s/apps/` | Deployments `spark` (+ PVC checkpoint), `simulator`, `dashboard` (+ NodePort 30851) |
+| `k8s/deploy.sh` | déploie tout dans l'ordre et attend chaque étape |
+
+### Déployer
+Prérequis : minikube installé et Docker Desktop lancé. Arrêter d'abord le stack Docker Compose (mémoire partagée) : `docker compose down` (sans `-v`).
+```bash
+minikube start --driver=docker --cpus=4 --memory=6g
+kubectl get nodes                 # minikube   Ready
+bash k8s/deploy.sh                # construit les images :1.0, les charge dans minikube, déploie (~10 min la 1re fois)
+SKIP_BUILD=1 bash k8s/deploy.sh   # redéploiement sans reconstruire ni recharger les images
+```
+
+### Utiliser
+```bash
+kubectl -n retailpulse get pods,pvc                           # état
+minikube service dashboard -n retailpulse                     # ouvre le tableau de bord (garder le terminal ouvert)
+kubectl -n retailpulse port-forward svc/spark-ui 4040:4040    # Spark UI sur http://localhost:4040
+kubectl -n retailpulse logs -f deploy/spark                   # logs d'un composant
+kubectl -n retailpulse scale deployment/simulator --replicas=0   # arrêter la simulation (1 pour relancer)
+```
+
+### Arrêter
+```bash
+kubectl delete namespace retailpulse   # supprime tout le déploiement (volumes compris)
+minikube stop                          # arrête le cluster sans le supprimer
+```
+
+## Mesurer les performances (section 14 du cahier)
+Au moins deux expériences, en faisant varier le débit de production, les partitions Kafka et/ou les ressources CPU/RAM. On mesure le **débit**, la **latence** et les **ressources**.
+
+### Préparation (Git Bash, depuis la racine du projet)
+```bash
+export MSYS_NO_PATHCONV=1
+sql() { docker exec retailpulse-postgres sh -c "psql -U \$POSTGRES_USER -d \$POSTGRES_DB -c \"$1\""; }
+
+# Nombre total de messages dans un topic (somme des 3 partitions)
+off() { docker exec retailpulse-kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server kafka:29092 --topic "$1" | awk -F: '{s+=$3} END {print s}'; }
+```
+
+### 1. Débit produit (événements publiés par seconde)
+```bash
+A=$(off retail-order-events); sleep 60; B=$(off retail-order-events)
+awk "BEGIN {printf \"Débit produit : %.2f événements/s\n\", ($B-$A)/60}"
+```
+Chaque commande produit 2 événements : un dans `retail-orders`, un dans `retail-order-events`.
+
+### 2. Débit traité par Spark
+- **Interface Spark** : http://localhost:4040/StreamingQuery/, requête `aggregates` → *Input Rate* (événements reçus/s), *Process Rate* (traités/s), *Batch Duration* (au-delà de 10 s, Spark prend du retard). Faire des captures pour le rapport.
+- **Depuis PostgreSQL** (commandes dont Spark a écrit le statut dans la dernière minute) :
+  ```bash
+  sql "SELECT count(*) AS commandes_traitees_par_minute FROM orders WHERE updated_at > now() - interval '1 minute'"
+  ```
+- **Retard de Spark sur Kafka (lag)** : Spark enregistre sa position dans son checkpoint, pas dans un groupe Kafka. On compare les deux :
+  ```bash
+  docker exec retailpulse-spark sh -c 'f=$(ls /checkpoints/aggregates/offsets | sort -n | tail -1); tail -1 /checkpoints/aggregates/offsets/$f'
+  docker exec retailpulse-kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server kafka:29092 --topic retail-order-events
+  ```
+  Offsets proches : Spark suit le rythme. Écart qui grandit d'une mesure à l'autre : Spark est saturé.
+
+### 3. Latence de bout en bout (émission → visible dans PostgreSQL)
+`created_at` = heure de création de la commande (dans l'événement), `updated_at` = heure d'écriture du statut par Spark. Tous les conteneurs partagent l'horloge de la machine : l'écart est la latence.
+```bash
+sql "SELECT count(*) commandes,
+  round(avg(extract(epoch FROM updated_at - created_at))::numeric, 1) AS latence_moy_s,
+  round(percentile_cont(0.5)  WITHIN GROUP (ORDER BY extract(epoch FROM updated_at - created_at))::numeric, 1) AS mediane_s,
+  round(percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM updated_at - created_at))::numeric, 1) AS p95_s
+FROM orders WHERE created_at > now() - interval '5 minutes' AND status <> 'CREATED'"
+```
+Cette latence inclut le délai simulé de 0,1 à 0,9 s entre commande et paiement. Pour la visibilité sur le tableau de bord, ajouter jusqu'à 10 s (fréquence d'actualisation de la page).
+
+### 4. Ressources CPU et mémoire
+```bash
+docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+```
+La lancer 3 ou 4 fois par expérience et garder la moyenne. Spark et Kafka sont les composants à surveiller.
+
+### 5. Expériences
+Pour chaque configuration : laisser tourner **2 minutes** pour stabiliser, puis relever les mesures 1 à 4.
+
+**Expérience 1 — débit de production.** Modifier l'intervalle du simulateur dans `.env`, puis le relancer :
+```bash
+# Config A (défaut) : SIM_INTERVAL_MIN=0.5  SIM_INTERVAL_MAX=2.0   → ~0,8 commande/s
+# Config B (charge) : SIM_INTERVAL_MIN=0.01 SIM_INTERVAL_MAX=0.02  → plusieurs dizaines/s
+docker compose up -d --no-deps simulator
+```
+
+**Expérience 2 — ressources de Spark** (garder la config B, sans rien reconstruire) :
+```bash
+docker update --cpus 1 --memory 2g --memory-swap 2g retailpulse-spark   # Spark bridé à 1 CPU
+# ... mesures ...
+docker update --cpus 0 retailpulse-spark                                 # retire la limite CPU
+```
+
+**Expérience 3 (facultative) — partitions Kafka.** Changer `--partitions 3` dans [kafka/create-topics.sh](kafka/create-topics.sh), puis repartir de zéro : `docker compose down -v && docker compose up -d --build`.
+
+### 6. Tableau de résultats
+| Config | Débit produit (évt/s) | Débit traité (évt/s, Spark UI) | Durée batch (s) | Latence médiane / p95 (s) | CPU / RAM Spark | CPU / RAM Kafka |
+|---|---|---|---|---|---|---|
+| A — défaut | | | | | | |
+| B — charge élevée | | | | | | |
+| B + Spark 1 CPU | | | | | | |
+
+Remettre ensuite la configuration par défaut : `SIM_INTERVAL_MIN=0.5` et `SIM_INTERVAL_MAX=2.0` dans `.env`, `docker compose up -d --no-deps simulator`, `docker update --cpus 0 retailpulse-spark`.
+
+Dans l'analyse : identifier le **goulot d'étranglement** (probablement Spark : durée de batch supérieure au trigger de 10 s, ou lag qui grandit) et **proposer des améliorations** (plus de CPU, `local[4]`, plus de partitions, trigger plus court, Spark en cluster).
+
 ## Arrêter
 ```bash
 docker compose down        # conserve les données
@@ -234,3 +375,5 @@ docker compose down -v     # supprime aussi les volumes (le schéma SQL sera rej
 - Spark tourne en mode `local[2]` dans un seul conteneur : pas de répartition sur plusieurs machines.
 - Un paiement en retard de plus de 10 minutes (watermark) n'entre pas dans le chiffre d'affaires ; il reste visible dans Kafka et dans `orders`.
 - Un doublon d'`event_id` arrivé plus de 10 minutes après l'original n'est plus détecté par la déduplication (mais il est alors aussi écarté par le watermark).
+- PostgreSQL indisponible : Spark s'arrête et compte sur le redémarrage automatique du conteneur pour reprendre (aucune perte grâce au checkpoint, mais pas de nouvelle tentative dans le code).
+- Kubernetes : un seul nœud minikube et un seul broker Kafka ; les pods sont recréés automatiquement, mais pas de tolérance à la perte du nœud.

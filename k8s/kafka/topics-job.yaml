@@ -1,0 +1,29 @@
+# Création des topics (script kafka/create-topics.sh, publié dans la ConfigMap "kafka-scripts" par deploy.sh).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-init
+  namespace: retailpulse
+  labels: {app.kubernetes.io/name: kafka-init, app.kubernetes.io/part-of: retailpulse}
+spec:
+  backoffLimit: 5
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: kafka-init, app.kubernetes.io/part-of: retailpulse}
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: kafka-init
+          image: apache/kafka:4.0.0
+          command: ["bash", "/scripts/create-topics.sh"]
+          env:
+            - {name: KAFKA_BOOTSTRAP_SERVERS, value: "kafka:29092"}
+          volumeMounts:
+            - {name: scripts, mountPath: /scripts}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+      volumes:
+        - name: scripts
+          configMap: {name: kafka-scripts}

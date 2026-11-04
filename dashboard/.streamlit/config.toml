@@ -1,0 +1,9 @@
+# Thème « Ardoise » : clair, gris froid, bleu institutionnel.
+# Les angles à 2 px sont réglés dans app.py (Streamlit 1.41 n'a pas d'option de rayon).
+[theme]
+base = "light"
+primaryColor = "#1F5FBF"
+backgroundColor = "#EEF1F5"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#18212C"
+font = "sans serif"
