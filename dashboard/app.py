@@ -2,7 +2,8 @@
 
 Lit uniquement les données persistées dans PostgreSQL (sales_aggregates, orders) :
 aucune agrégation métier n'est recalculée ici, à une exception près : la page « Carte
-de chaleur » regroupe les commandes par ville, car sales_aggregates ne porte pas la ville.
+de chaleur » regroupe les commandes par ville, car sales_aggregates ne porte pas la ville,
+et la page « Tableau libre » regroupe à la demande les lignes lues (sommes et ratios de sommes).
 Actualisation automatique.
 """
 import base64
@@ -43,6 +44,67 @@ STATUS_STYLES = {
     "En attente de paiement": "color: #7A5200; background-color: #FDF1DA; font-weight: 600",
 }
 ORDERS_LIMIT = 50
+
+# Tableau libre : périodes, granularités (pas, format d'affichage) et sources.
+FREE_PERIODS = {
+    "Tout l'historique": None,
+    "6 dernières heures": 6,
+    "Dernier jour": 24,
+    "3 derniers jours": 72,
+    "Dernière semaine": 168,
+}
+FREE_GRANULARITIES = {
+    "5 minutes": ("5min", "DD/MM HH:mm"),
+    "Heure": ("1h", "DD/MM HH:mm"),
+    "Jour": ("1D", "DD/MM/YYYY"),
+}
+# kind : money / int / pct / ratio (formats d'affichage). Les mesures « dérivées » sont recalculées
+# à partir des sommes du groupe (jamais par moyenne de moyennes).
+FREE_SOURCES = {
+    "Ventes par catégorie (agrégats Spark)": {
+        "id": "sales",
+        "query": """
+            SELECT category, window_start AS period_ts, order_count AS orders,
+                   total_quantity AS quantity, total_revenue AS revenue
+            FROM sales_aggregates
+            WHERE (%(hours)s::int IS NULL OR window_start >= now() - make_interval(hours => %(hours)s::int))
+        """,
+        "base": ["revenue", "orders", "quantity"],
+        "dimensions": {"Catégorie": "category"},
+        "measures": {
+            f"Chiffre d'affaires ({CURRENCY})": ("revenue", "money"),
+            "Commandes": ("orders", "int"),
+            "Articles vendus": ("quantity", "int"),
+            f"Panier moyen ({CURRENCY})": ("avg_basket", "money"),
+            "Articles par commande": ("items_per_order", "ratio"),
+        },
+        "default_dimensions": ["Catégorie"],
+        "default_measures": [f"Chiffre d'affaires ({CURRENCY})", "Commandes", "Articles vendus"],
+    },
+    "Commandes (PostgreSQL)": {
+        "id": "orders",
+        "query": """
+            SELECT o.created_at AS period_ts, c.city, c.first_name || ' ' || c.last_name AS customer,
+                   o.status, o.total_amount
+            FROM orders o JOIN customers c USING (customer_id)
+            WHERE (%(hours)s::int IS NULL OR o.created_at >= now() - make_interval(hours => %(hours)s::int))
+        """,
+        "base": ["orders", "paid", "cancelled", "refused", "revenue"],
+        "dimensions": {"Ville": "city", "Statut": "status_label", "Client": "customer"},
+        "measures": {
+            "Commandes": ("orders", "int"),
+            "Commandes payées": ("paid", "int"),
+            "Paiements refusés": ("refused", "int"),
+            "Commandes annulées": ("cancelled", "int"),
+            f"Chiffre d'affaires ({CURRENCY})": ("revenue", "money"),
+            f"Panier moyen des payées ({CURRENCY})": ("avg_basket", "money"),
+            "Taux de paiement refusé": ("refusal_rate", "pct"),
+            "Taux d'annulation": ("cancel_rate", "pct"),
+        },
+        "default_dimensions": ["Ville"],
+        "default_measures": ["Commandes", "Commandes payées", f"Chiffre d'affaires ({CURRENCY})", "Taux d'annulation"],
+    },
+}
 
 # Période -> (heures affichées, taille d'une tranche, format de l'axe, libellé de la tranche).
 # Les fenêtres Spark de 5 minutes sont simplement regroupées pour garder 50 à 75 points lisibles.
@@ -122,8 +184,8 @@ QUERIES = {
 }
 
 
-def load():
-    connection = psycopg2.connect(
+def connect():
+    return psycopg2.connect(
         host=os.getenv("POSTGRES_HOST", "postgres"),
         port=int(os.getenv("POSTGRES_PORT", "5432")),
         user=os.environ["POSTGRES_USER"],
@@ -131,6 +193,10 @@ def load():
         dbname=os.environ["POSTGRES_DB"],
         connect_timeout=5,
     )
+
+
+def load():
+    connection = connect()
     try:
         with connection.cursor() as cursor:
             return {name: query(cursor, sql) for name, sql in QUERIES.items()}
@@ -138,8 +204,8 @@ def load():
         connection.close()
 
 
-def query(cursor, sql):
-    cursor.execute(sql)
+def query(cursor, sql, params=None):
+    cursor.execute(sql, params)
     df = pd.DataFrame(cursor.fetchall(), columns=[c.name for c in cursor.description])
     # NUMERIC arrive en Decimal : conversion en float pour les graphiques et tableaux.
     for column in df.columns:
@@ -516,6 +582,139 @@ def map_page():
     )
 
 
+def load_free(source_id, hours):
+    source = next(s for s in FREE_SOURCES.values() if s["id"] == source_id)
+    connection = connect()
+    try:
+        with connection.cursor() as cursor:
+            return query(cursor, source["query"], {"hours": hours})
+    finally:
+        connection.close()
+
+
+def prepare_free(source_id, raw):
+    df = raw.copy()
+    if source_id == "sales":
+        df[["revenue", "orders", "quantity"]] = df[["revenue", "orders", "quantity"]].astype(float)
+        return df
+    paid = df["status"] == "PAID"
+    df["orders"] = 1
+    df["paid"] = paid.astype(int)
+    df["cancelled"] = (df["status"] == "CANCELLED").astype(int)
+    df["refused"] = (df["status"] == "FAILED").astype(int)
+    df["revenue"] = np.where(paid, df["total_amount"].astype(float), 0.0)
+    df["status_label"] = df["status"].map(STATUS_LABELS).fillna(df["status"])
+    return df
+
+
+def derive_free(df):
+    """Ajoute les ratios, calculés à partir des sommes déjà agrégées du groupe."""
+    def ratio(numerator, denominator):
+        return numerator / denominator.where(denominator != 0)
+
+    df = df.copy()
+    df["avg_basket"] = ratio(df["revenue"], df["paid"] if "paid" in df else df["orders"])
+    if "quantity" in df:
+        df["items_per_order"] = ratio(df["quantity"], df["orders"])
+    if "refused" in df:
+        df["refusal_rate"] = ratio(df["refused"], df["orders"]) * 100
+        df["cancel_rate"] = ratio(df["cancelled"], df["orders"]) * 100
+    return df
+
+
+def measure_config(kind, label):
+    formats = {"money": "%.2f", "int": "%d", "pct": "%.1f %%", "ratio": "%.1f"}
+    return st.column_config.NumberColumn(label, format=formats[kind])
+
+
+@st.fragment(run_every=REFRESH_SECONDS)
+def free_table_page():
+    """Page 4 : tableau libre, avec choix des champs, du niveau d'agrégation et des mesures."""
+    if fetch() is None:
+        return
+
+    source_label = st.radio("Source de données", list(FREE_SOURCES), horizontal=True, key="free_source")
+    source = FREE_SOURCES[source_label]
+    sid = source["id"]
+    dimension_options = ["Période", *source["dimensions"]]
+
+    col_period, col_dims, col_measures = st.columns([1, 1.3, 2])
+    period = col_period.selectbox("Période analysée", list(FREE_PERIODS), index=2, key=f"free_period_{sid}")
+    dimensions = col_dims.multiselect("Regrouper par", dimension_options,
+                                      default=source["default_dimensions"], key=f"free_dims_{sid}")
+    measures = col_measures.multiselect("Mesures", list(source["measures"]),
+                                        default=source["default_measures"], key=f"free_measures_{sid}")
+    if not measures:
+        st.info("Choisir au moins une mesure pour générer le tableau.")
+        return
+    has_period = "Période" in dimensions
+
+    sort_options = [*dimensions, *measures]
+    col_gran, col_sort, col_order, col_rows = st.columns([1, 1.3, 1, 1])
+    granularity = col_gran.selectbox("Granularité de la période", list(FREE_GRANULARITIES), index=1,
+                                     disabled=not has_period, key=f"free_gran_{sid}",
+                                     help="Active seulement si « Période » fait partie des champs de regroupement.")
+    sort_default = sort_options.index("Période") if has_period else len(dimensions)
+    sort_by = col_sort.selectbox("Trier par", sort_options, index=sort_default)
+    descending = col_order.radio("Ordre", ["Décroissant", "Croissant"], index=1 if has_period else 0,
+                                 horizontal=True) == "Décroissant"
+    limit = col_rows.number_input("Lignes affichées (max)", min_value=5, max_value=1000, value=50, step=5,
+                                  key=f"free_limit_{sid}")
+
+    try:
+        raw = load_free(sid, FREE_PERIODS[period])
+    except psycopg2.Error as exc:
+        st.error(f"Lecture impossible : {exc}")
+        return
+    if raw.empty:
+        st.info(f"Aucune donnée sur la période « {period.lower()} ».")
+        return
+
+    freq, date_format = FREE_GRANULARITIES[granularity]
+    df = prepare_free(sid, raw)
+    columns = {label: source["dimensions"][label] for label in dimensions if label != "Période"}
+    if has_period:
+        df["period"] = df["period_ts"].dt.floor(freq)
+        columns = {"Période": "period", **columns}
+    base = source["base"]
+    if columns:
+        grouped = df.groupby(list(columns.values()), dropna=False)[base].sum().reset_index()
+    else:
+        grouped = df[base].sum().to_frame().T
+    grouped = derive_free(grouped)
+    totals = derive_free(df[base].sum().to_frame().T)
+
+    # Libellés d'affichage, dans l'ordre choisi par l'utilisateur.
+    measure_columns = {label: source["measures"][label][0] for label in measures}
+    kinds = {label: source["measures"][label][1] for label in measures}
+    table = grouped[[*columns.values(), *measure_columns.values()]]
+    table.columns = [*columns.keys(), *measure_columns.keys()]
+    table = table.sort_values(sort_by, ascending=not descending, na_position="last")
+
+    shown = table.head(int(limit))
+    config = {label: measure_config(kinds[label], label) for label in measures}
+    if has_period:
+        config["Période"] = st.column_config.DatetimeColumn("Période", format=date_format)
+    styled = shown.style.map(status_style, subset=["Statut"]) if "Statut" in shown else shown
+    st.caption(f"{len(shown)} ligne(s) affichée(s) sur {len(table)} — {len(raw)} enregistrement(s) lus "
+               f"sur la période « {period.lower()} ».")
+    if sid == "sales":
+        st.caption("Les commandes sont comptées par catégorie : une commande de plusieurs catégories compte dans chacune.")
+    st.dataframe(styled, hide_index=True, use_container_width=True, column_config=config)
+
+    total_table = totals[list(measure_columns.values())]
+    total_table.columns = list(measure_columns.keys())
+    st.markdown("**Total de la sélection**")
+    st.dataframe(total_table, hide_index=True, use_container_width=True,
+                 column_config={label: measure_config(kinds[label], label) for label in measures})
+
+    export = table.copy()
+    if "Période" in export:
+        export["Période"] = export["Période"].dt.strftime("%Y-%m-%d %H:%M")
+    st.download_button("Exporter en CSV", export.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                       file_name="tableau_libre.csv", mime="text/csv")
+
+
 st.set_page_config(page_title="RetailPulse", page_icon="📈", layout="wide")
 st.markdown(
     f"""
@@ -560,6 +759,7 @@ navigation = st.navigation(
         st.Page(overview_page, title="Indicateurs", default=True),
         st.Page(orders_page, title="Suivi des commandes", url_path="commandes"),
         st.Page(map_page, title="Carte de chaleur", url_path="carte"),
+        st.Page(free_table_page, title="Tableau libre", url_path="tableau-libre"),
     ]
 )
 

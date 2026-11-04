@@ -198,6 +198,7 @@ Tableau de bord **Streamlit**, ouvert sur **http://localhost:8501**. Il lit Post
 - **Actualisation** toutes les 60 secondes (`DASHBOARD_REFRESH_SECONDS`), sans recharger la page.
 - **Fraîcheur** : bandeau vert si le dernier agrégat date de moins de 60 s, orange (« Données figées ») sinon : simulateur ou Spark arrêté.
 - **Erreurs** : base vide → message d'information ; PostgreSQL injoignable → message d'erreur, nouvel essai automatique.
+- **Tableau libre** (4ᵉ page) : l'utilisateur choisit la source (agrégats Spark ou commandes), la période, les champs de regroupement (période à 5 min / heure / jour, catégorie, ville, statut, client), les mesures (CA, commandes, panier moyen, taux d'annulation…), le tri et le nombre de lignes ; total de la sélection et export CSV. Les ratios sont recalculés à partir des sommes du groupe.
 - Graphiques en une seule teinte (une série par graphique) avec info-bulles au survol ; les montants exacts sont aussi dans les tableaux.
 
 ### postgres (`postgres/init/01_schema.sql`)
