@@ -144,8 +144,8 @@ sql "SELECT count(*) commandes, count(*) FILTER (WHERE status='PAID') payees FRO
 ✅ Attendu :
 - bandeau vert « Données à jour » ;
 - les indicateurs de la page égaux aux résultats SQL (à quelques commandes près si le simulateur tourne) ;
-- **critère d'acceptation** : simulateur actif (`docker compose start simulator`), les commandes, le CA et le tableau « Dernières commandes » changent toutes les 10 s **sans recharger la page** ;
-- simulateur arrêté depuis plus d'une minute : bandeau orange « Données figées ».
+- **critère d'acceptation** : simulateur actif (`docker compose start simulator`), les commandes, le CA et le tableau « Dernières commandes » changent **sans recharger la page** (la page est relue toutes les 60 s ; les chiffres ne bougent qu'à chaque micro-batch de Spark, toutes les 10 s avec `SPARK_TRIGGER_INTERVAL=10 seconds`, toutes les 5 min par défaut) ;
+- simulateur arrêté depuis plus de 10 minutes (seuil `STALE_AFTER_SECONDS`, 600 s) : bandeau orange « Données figées ».
 
 ## 11. PostgreSQL indisponible
 ```bash

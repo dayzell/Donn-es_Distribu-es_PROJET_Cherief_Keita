@@ -1,5 +1,7 @@
 # RetailPulse — plateforme distribuée e-commerce en quasi-temps réel
 
+> **En clair** : RetailPulse imite une boutique en ligne qui reçoit des commandes toute la journée. Chaque commande et chaque paiement passent par une « boîte aux lettres » rapide (Kafka), un moteur de calcul (Spark) additionne en continu ce qui est vendu, et un tableau de bord affiche le chiffre d'affaires presque en direct, sans que personne n'ait à rafraîchir ou à recalculer à la main. Le tout démarre en une commande (Docker Compose) et peut aussi tourner dans Kubernetes (minikube).
+
 Projet Master 2 Data — module Données distribuées. Chaîne cible (cahier des charges) :
 
 ```
@@ -7,6 +9,8 @@ API DummyJSON → producer → Kafka → consumer → PostgreSQL     (référent
 simulator → Kafka → Spark → PostgreSQL                        (commandes, paiements, CA : fait)
 PostgreSQL → dashboard (Streamlit)                            (tableau de bord : fait)
 ```
+
+Deux façons de lancer la plateforme : **Docker Compose** (section [Démarrage](#démarrage)) ou **Kubernetes / minikube** (section [Déploiement Kubernetes](#déploiement-kubernetes-minikube)).
 
 ## État d'avancement (démarche du cahier des charges, section 16)
 | Étape | Contenu | État |
@@ -19,7 +23,8 @@ PostgreSQL → dashboard (Streamlit)                            (tableau de bord
 | 07 | PostgreSQL : schéma, contraintes, index, upsert | **fait** (upsert des agrégats et des commandes par Spark) |
 | 08 | Tableau de bord | **fait** — http://localhost:8501 ; tests : [docs/tests-etape-08-dashboard.md](docs/tests-etape-08-dashboard.md) |
 | 09 | Docker et Kubernetes | **fait** — déployé et testé sur minikube : [docs/deploiement-kubernetes.md](docs/deploiement-kubernetes.md) |
-| 10 | Tests et soutenance | à faire |
+| 10 | Tests de résilience et mesures de performance | **fait** — notebook [tests/resilience_performance.ipynb](tests/resilience_performance.ipynb), mesures : [docs/resultats-performance.csv](docs/resultats-performance.csv) |
+| — | Soutenance | à faire |
 
 ## Structure du dépôt
 Un dossier par service, nommé d'après ce qu'il contient.
@@ -41,10 +46,13 @@ Un dossier par service, nommé d'après ce qu'il contient.
 │   ├── streaming.py  Dockerfile  requirements.txt
 ├── dashboard/                  # Streamlit : tableau de bord, lit PostgreSQL
 │   ├── app.py  Dockerfile  requirements.txt
+│   ├── .streamlit/config.toml  # thème et réglages Streamlit
+│   └── spark-logo.png  us-states.json   # logo du lien Spark ; contours des États (carte de chaleur)
 ├── k8s/                        # manifestes Kubernetes (namespace, config, kafka, postgres, jobs, apps) + deploy.sh
 ├── tests/
-│   └── check_pipeline.py       # compare PostgreSQL au contenu de Kafka
-└── docs/                       # rapports et dossier d'architecture
+│   ├── check_pipeline.py       # compare PostgreSQL au contenu de Kafka
+│   └── resilience_performance.ipynb  # notebook : 7 scénarios de résilience + mesures de performance
+└── docs/                       # cahier des charges, rapports de test, guide de test, déploiement Kubernetes, résultats de performance
 ```
 
 ## Démarrage
@@ -68,6 +76,8 @@ Résultat attendu après environ deux minutes (plus longtemps au premier lanceme
 | `retailpulse-dashboard` | `Up (healthy)` | tableau de bord sur **http://localhost:8501** |
 
 `Exited (0)` est normal pour kafka-init, producer et consumer : ce sont des traitements ponctuels (des « Jobs »), pas des services permanents.
+
+Pour lancer la plateforme dans Kubernetes à la place, voir [Déploiement Kubernetes (minikube)](#déploiement-kubernetes-minikube) plus bas.
 
 ## Ce que fait chaque service
 
@@ -195,9 +205,11 @@ Tableau de bord **Streamlit**, ouvert sur **http://localhost:8501**. Il lit Post
 | Dernières commandes (statut avec icône et libellé) et dernières agrégations | `orders`, `sales_aggregates` |
 | Heure de dernière actualisation et fraîcheur des données | `max(updated_at)` des agrégats |
 
-- **Actualisation** toutes les 60 secondes (`DASHBOARD_REFRESH_SECONDS`), sans recharger la page.
-- **Fraîcheur** : bandeau vert si le dernier agrégat date de moins de 60 s, orange (« Données figées ») sinon : simulateur ou Spark arrêté.
+- **Quatre pages** (menu latéral) : *Indicateurs* (chiffres clés, évolution du CA, catégories), *Suivi des commandes*, *Carte de chaleur* et *Tableau libre*. En bas du menu, un lien « Ouvrir l'interface Spark » (adresse réglable avec `SPARK_UI_URL`, `http://localhost:4040` par défaut).
+- **Actualisation** de la page toutes les 60 secondes (`DASHBOARD_REFRESH_SECONDS`), sans la recharger. Les données, elles, ne changent qu'à chaque micro-batch de Spark (5 minutes par défaut).
+- **Fraîcheur** : bandeau vert si le dernier agrégat date de moins de 10 minutes (`STALE_AFTER_SECONDS`, 600 s : un peu plus que le trigger de Spark), orange (« Données figées ») sinon : simulateur ou Spark arrêté.
 - **Erreurs** : base vide → message d'information ; PostgreSQL injoignable → message d'erreur, nouvel essai automatique.
+- **Carte de chaleur** (3ᵉ page) : ventes par ville sur une carte des États-Unis, avec l'indicateur affiché au choix (CA, commandes, taux d'annulation…). Elle regroupe les commandes de la table `orders` sur les `HEATMAP_HOURS` dernières heures (2 par défaut), car `sales_aggregates` ne contient pas la ville.
 - **Tableau libre** (4ᵉ page) : l'utilisateur choisit la source (agrégats Spark ou commandes), la période, les champs de regroupement (période à 5 min / heure / jour, catégorie, ville, statut, client), les mesures (CA, commandes, panier moyen, taux d'annulation…), le tri et le nombre de lignes ; total de la sélection et export CSV. Les ratios sont recalculés à partir des sommes du groupe.
 - Graphiques en une seule teinte (une série par graphique) avec info-bulles au survol ; les montants exacts sont aussi dans les tableaux.
 
@@ -325,7 +337,7 @@ sql "SELECT count(*) commandes,
   round(percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM updated_at - created_at))::numeric, 1) AS p95_s
 FROM orders WHERE created_at > now() - interval '5 minutes' AND status <> 'CREATED'"
 ```
-Cette latence inclut le délai simulé de 0,1 à 0,9 s entre commande et paiement. Pour la visibilité sur le tableau de bord, ajouter jusqu'à 10 s (fréquence d'actualisation de la page).
+Cette latence inclut le délai simulé de 0,1 à 0,9 s entre commande et paiement. Pour la visibilité sur le tableau de bord, ajouter jusqu'à 60 s (fréquence d'actualisation de la page) ; avec le trigger par défaut de 5 min, la valeur affichée ne change qu'à chaque micro-batch. Les mesures ci-dessous supposent un trigger court (ex. `SPARK_TRIGGER_INTERVAL=10 seconds`).
 
 ### 4. Ressources CPU et mémoire
 ```bash
@@ -353,11 +365,15 @@ docker update --cpus 0 retailpulse-spark                                 # retir
 **Expérience 3 (facultative) — partitions Kafka.** Changer `--partitions 3` dans [kafka/create-topics.sh](kafka/create-topics.sh), puis repartir de zéro : `docker compose down -v && docker compose up -d --build`.
 
 ### 6. Tableau de résultats
-| Config | Débit produit (évt/s) | Débit traité (évt/s, Spark UI) | Durée batch (s) | Latence médiane / p95 (s) | CPU / RAM Spark | CPU / RAM Kafka |
+Mesures obtenues avec le notebook [tests/resilience_performance.ipynb](tests/resilience_performance.ipynb) (données brutes : [docs/resultats-performance.csv](docs/resultats-performance.csv)).
+
+| Config | Débit produit (évt/s) | Débit traité (évt/s) | Lag fin (msgs) | Latence médiane / p95 (s) | CPU / RAM Spark | CPU / RAM Kafka |
 |---|---|---|---|---|---|---|
-| A — défaut | | | | | | |
-| B — charge élevée | | | | | | |
-| B + Spark 1 CPU | | | | | | |
+| A — défaut (~0,8 cmd/s) | 1,8 | 1,7 | 18 | 7,7 / 12,1 | 99 % / 621 MiB | 5 % / 1 064 MiB |
+| B — charge élevée | 137,4 | 132,0 | 1 711 | 8,3 / 12,9 | 105 % / 637 MiB | 82 % / 1 093 MiB |
+| B + Spark 1 CPU | 135,7 | 131,6 | 2 240 | 8,2 / 13,1 | 101 % / 710 MiB | 49 % / 1 112 MiB |
+
+Lecture : à charge élevée (B), Spark traite presque tout ce qui arrive (132 évt/s sur 137), mais le retard final (lag) grandit quand on le bride à 1 CPU (1 711 → 2 240 messages) : Spark est le composant qui sature en premier. La durée de batch (Spark UI) n'est pas dans le CSV.
 
 Remettre ensuite la configuration par défaut : `SIM_INTERVAL_MIN=0.5` et `SIM_INTERVAL_MAX=2.0` dans `.env`, `docker compose up -d --no-deps simulator`, `docker update --cpus 0 retailpulse-spark`.
 

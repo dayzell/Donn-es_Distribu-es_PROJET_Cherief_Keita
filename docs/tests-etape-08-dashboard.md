@@ -2,6 +2,8 @@
 
 Tests réalisés le 3 novembre 2026 sur la stack Docker Compose, simulateur actif, Spark en fonctionnement continu depuis la veille (environ 7 000 commandes en base).
 
+> **Note (réglages modifiés depuis)** : ces tests datent d'une version du tableau de bord qui s'actualisait toutes les 10 s et signalait des données figées après 60 s. Depuis, la page est relue toutes les 60 s (`DASHBOARD_REFRESH_SECONDS`) et le seuil « Données figées » est de 600 s (`STALE_AFTER_SECONDS`), pour suivre le trigger Spark de 5 min. Les résultats ci-dessous sont ceux observés à l'époque.
+
 L'application Streamlit a été exécutée avec l'outil de test intégré de Streamlit (`streamlit.testing.v1.AppTest`), dans le conteneur `retailpulse-dashboard`. Il exécute le script comme le ferait un navigateur et permet de lire les indicateurs, bandeaux et tableaux affichés.
 
 ## Synthèse
